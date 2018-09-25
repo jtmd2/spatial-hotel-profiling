@@ -1,0 +1,648 @@
+---
+title: "trivago Case Study: Which hotel is better for nightlife?"
+author: "Jac Davis"
+date: "9 July 2018"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, include=FALSE)
+```
+
+*This report was written in rmarkdown. The full report can be reproduced using the rmarkdown file. Code chunks can be run separately within the rmarkdown file if needed. If you want to view the report with the code included, set echo=TRUE in the above code chunk.*
+
+
+# Which hotel is better for nightlife? #
+
+**Problem**. Make it easier for travellers interested in "nightlife" to find a suitable hotel.   
+**Solution**. Create a score to rank hotels according to their suitability for travellers interested in "nightlife".
+
+**Intended audience**. The intended audience for this analysis and presentation is trivago product managers, with a strong consideration of how useful the score will be for travellers using trivago.
+
+**Considerations**. The problem requires estimation of a "nightlife" score for hotels. This "nightlife" score is not directly observable, and so it must be estimated from the data that we do have. These data may be skewed, missing, or unreliable. To discover some of the potential issues with the data, an exploratory analysis is presented first.
+
+**Summary of the approach**. The following sections are presented in order. An **exploratory analysis** presents a description of the dataset, summary statistics, and geographic information. Then a **score creation** section describes the calculation method for the nightlife score, based on geographic density of nightlife POIs, and gives information about score quality.
+
+\newpage
+
+# Part 1. Exploratory analysis of the input data #
+
+This section presents an exploration and visualisation of the data.
+
+Two .csv files contribute data to this analysis. The **hotels** csv lists hotels in four cities, their geo-coordinates, and information about the hotel. The **pois** csv lists points of interest (POIs) in the same four cities, their geo-coordinates, and information about the POIs.
+
+The data exploration is presented in three parts:
+1. Summary statistics and distributions of the hotel data
+2. Missing data analysis
+3. Geographic exploration
+
+## 1.1. Summary Statistics ##
+
+*1.1. Summary statistics*. Summary statistics are useful for understanding the data, and distributions are important because some statistical techniques require data to be distributed in a particular way (e.g., normal or Gaussian distribution is required for OLS regression). We need to know what techniques might be suitable for these data.
+
+```{r data cleaning and manipulation, include=FALSE}
+
+setwd("C:\\Users\\Topsy\\Desktop\\trivago case study") #set working directory
+
+# load required packages  - ended up being a lot, could streamline this
+require(psych) # package for summary statistics
+require(stats) # statistics package
+require(MASS) # package for density estimation
+require(misc3d) # package for density estimation
+require(lme4) # package for linear mixed-effects modelling
+require(arm) # package for hierarchical modelling
+require(scales) # package for rescaling
+require(plyr) # data manipulation package
+require(dplyr) # data manipulation package
+require(reshape2) # data manipulation package
+require(data.table) # data manipulation package
+require(stringr) # text manipulation package
+require(knitr) # reporting package
+options(digits = 2)
+require(pander) # markdown helper for tables
+require(gridExtra) # markdown helper for tables
+require(ggmap) # mapping package
+require(ggplot2) # visualisation package
+theme_set(theme_bw()) #set theme for ggplot to black & white
+
+# read in data
+hotels <- read.csv("hotels.csv") # read in hotels data
+pois <- read.csv("pois.csv") # read in pois data
+
+# check data
+is.character(hotels$hotel_id) # check data has been read properly (should be FALSE)
+
+# clean data
+hotels[hotels=="NA"] <- NA # tell R that NA means missing data
+pois[pois=="NA"] <- NA # tell R that NA means missing data
+
+# add city names to "hotels" - preferably not manually
+hotels$city_name <- NULL # create empty variable to be filled
+hotels$city_name[hotels$city_id==27561] <- "Amsterdam"
+hotels$city_name[hotels$city_id==31497] <- "Hong Kong"
+hotels$city_name[hotels$city_id==14121] <- "Thessaloniki"
+hotels$city_name[hotels$city_id==14257] <- "Los Angeles"
+```
+
+
+*Hotels.* The **hotels** dataset has `r length(hotels)` variables and `r nrow(hotels)` rows.
+The variables are: `r names(hotels)`. 
+
+There are four cities included in the dataset: Amsterdam, Los Angeles, Hong Kong, and Thessaloniki. These cities may show different patterns of travel, so we should look at them separately.
+
+```{r summary statistics, include=FALSE}
+
+# identify variables that are factors
+factors <- c("hotel_id","city_id","hotel_type","basename","car_park","club_club_hotel",
+             "designer_hotel","attraction_hotel","luxury_hotel","beach_front_hotel",
+             "convention_hotel","spa_hotel","country_hotel","airport_hotel",
+             "senior_hotel","eco_friendly_hotel","party_people","business_people",
+             "honeymooners","singles","large_groups","family_hotel",
+             "gay_friendly","wifi_lobby","wifi_room","city_name")
+hotels[factors] <- lapply(hotels[factors], factor)
+
+```
+
+Let's take a first look at the hotel data.
+```{r tables, include=FALSE} 
+hotel_types <- c("hotel_type")
+hotel_info <- c("club_club_hotel","designer_hotel","attraction_hotel","luxury_hotel","beach_front_hotel","convention_hotel","spa_hotel","country_hotel","airport_hotel","senior_hotel","eco_friendly_hotel")
+hotel_people <- c("party_people","business_people","honeymooners","singles","large_groups","family_hotel","gay_friendly")
+hotel_wifi <- c("wifi_lobby","wifi_room")
+hotel_rating <- c("overall_rating","impression_level","interaction_level")
+
+table1 <- xtabs(~hotel_type+city_name, data=hotels) # easy table
+
+# combined tables - hard-coded answers for now, would be better to read in data
+# count the number of 0(No), 1(Yes), and NA(missing) values and bind them into tables
+table2 <- rbind(c("No","Yes","Missing"),
+                cbind(apply(X=hotels[hotel_info],2,FUN=function(x) length(which(x==0))),
+                apply(X=hotels[hotel_info],2,FUN=function(x) length(which(x==1))),
+                apply(X=hotels[hotel_info],2,FUN=function(x) length(which(is.na(x))))))
+table3 <- rbind(c("No","Yes","Missing"),
+                cbind(apply(X=hotels[hotel_people],2,FUN=function(x) length(which(x==0))),
+                apply(X=hotels[hotel_people],2,FUN=function(x) length(which(x==1))),
+                apply(X=hotels[hotel_people],2,FUN=function(x) length(which(is.na(x))))))
+table4 <- rbind(c("No","Yes","Missing"),
+                cbind(apply(X=hotels[hotel_wifi],2,FUN=function(x) length(which(x==0))),
+                apply(X=hotels[hotel_wifi],2,FUN=function(x) length(which(x==1))),
+                apply(X=hotels[hotel_wifi],2,FUN=function(x) length(which(is.na(x))))))
+table5 <- rbind(c("Mean","Standard Deviation","Min","Max","Missing"),
+                cbind(apply(X=hotels[hotel_rating],2,FUN=function(x) mean(x, na.rm=TRUE)),
+                apply(X=hotels[hotel_rating],2,FUN=function(x) sd(x, na.rm=TRUE)),
+                apply(X=hotels[hotel_rating],2,FUN=function(x) min(x, na.rm=TRUE)),
+                apply(X=hotels[hotel_rating],2,FUN=function(x) max(x, na.rm=TRUE)),
+                apply(X=hotels[hotel_rating],2,FUN=function(x) length(which(is.na(x))))))
+
+```
+
+\newpage
+
+Here is the information we know about hotels
+
+Types of hotels in different cities:
+
+`r kable(table1)`
+
+Hotels with different characteristics, such as "luxury hotels":
+
+`r kable(table2)`
+
+Hotels targeting specific people, such as "party people":
+
+`r kable(table3)`
+
+Hotel wifi:
+
+`r kable(table4)`
+
+\newpage
+
+We also know how some information about the hotels' performance:
+
+`r kable(table5)`
+
+```{r histograms, include=FALSE}
+#par(mfrow=c(2,2))
+png(filename="hist.png",height=295,width=500,bg="white")
+par(mfrow=c(1,3))
+plots <- lapply(names(hotels[hotel_rating]), function(x) hist(hotels[hotel_rating][[x]], main=x, xlab=x, col="grey"))
+plots
+dev.off()
+par(mfrow=c(1,1))
+```
+
+![Hotel rating, impressions, and interactions](hist.png)
+
+Finally, we have some spatial information: latitude, longitude, and distance to center for each hotel. It will be best to explore these in a map (see section 1.3).
+
+\newpage
+
+## 1.2. Missing Data ##
+
+*1.2. Missing data analysis*. It is important to diagnose and correct for missing data. Missing data is common in real-world analytic scenarios, but the amount and type of missing data can affect the analytic results (in this case, the nightlife score) in different ways. Very small amounts of missing data, or data that are missing at random, can be easily assumed to not affect the result, and can be dealt with by deletion or imputation. However, large amounts of missing data, or data missing "not at random"" - where the missing values might be systematically different to the values that we observe in the dataset - cannot be dealt with through simple deletion or imputation. The best way to deal with data that are missing not at random is to collect more data.
+
+Are the data in our dataset missing at random?
+
+```{r missing}
+
+table6<- cbind(c("Percent missing"),
+               apply(X=hotels[hotel_people],2,FUN=function(x) (length(which(is.na(x))))/length(x)*100))
+
+```
+
+`r kable(table6)`
+
+As seen in the table, there is a very high percentage of missing data in these hotel variables. For example, "party_people" has 82% missing data. This high proportion of missing data is a problem - even if we impute the missing values, we are likely to impute low-quality estimates, because the hotels that have this information may be systematically different to hotels that do not have it. For example, hotels that provide information about "party_people" may also be systematically better for nightlife than hotels that do not provide this information. If we train our dataset only on this subset, we will get biased results. Similarly, if we assume that any missing value is actually zero, we will get biased results, because it could actually be 1.
+
+But these variables, such as "party people" and "business people", seem intuitively very useful for a nightlife score. We could combine several of them into a single score, to give us more data. We could assume that hotels with a 1 for "party people" or "singles" might be good for nightlife, but hotels with a 1 for "business people" or "family hotel" might be bad for nightlife.
+
+```{r comb}
+
+# create a variable where 1 = party people or singles hotel, 0 = business or family hotel, NA = missing
+hotels$combine <- NA
+hotels$combine[hotels$party_people==1] <- 1
+hotels$combine[hotels$singles==1] <- 1
+hotels$combine[hotels$business_people==1] <- 0
+hotels$combine[hotels$family_hotel==1] <- 0
+
+tablecomb <- table(hotels$combine)
+names(tablecomb) <- c("Business or Family","Party or Single")
+tablenacomb <- table(is.na(hotels$combine))
+names(tablenacomb) <- c("Not missing","Missing")
+
+comb1 <- lm(is.na(combine) ~ impression_level, data = hotels)
+res1 <- summary(comb1)
+
+comb2 <- lm(is.na(combine) ~ interaction_level, data = hotels)
+res2 <- summary(comb2)
+
+coefsc <- rbind(c("","Coefficient","SE","p value"),
+               c("Impression level",res1$coefficients[2],res1$coefficients[4],res1$coefficients[8]),
+               c("Interaction level",res2$coefficients[2],res2$coefficients[4],res2$coefficients[8]))
+names(coefsc) <- c("","Coefficient","SE","p value")
+
+```
+
+Let's take a look at our combined variable.
+
+`r pander(tablecomb)`
+
+`r pander(tablenacomb)`
+
+Now we have many more observations, but the total amount of missing data is still `r (tablenacomb[2]/tablenacomb[1])*100`% missing data. 
+
+Additionally, the combined score is strongly skewed to "business or family" hotels over "party or single" hotels. There just aren't many hotels in the dataset that are marked as "party people" or for "singles" - only 20 hotels in total. When we split this number into different cities, we will have even fewer observations.
+
+So the hotel's description as a "party people" or "singles" hotel isn't a good choice to base a nightlife score on. For example, if we used a machine learning algorithm to predict hotels' scores on this variable, it would most likely just predict that every hotel was a "business or family" hotel (n = 258) and no hotels were "party or singles" hotels (n = 20). Guessing that every hotel was not a party or singles hotel would give the model very high predictive power, but would be close to useless for a score that we want to use to distinguish hotels.
+
+As a final check, let's see whether hotels with missing values on this combined variable, are actually different to hotels that don't have missing values. We can do this by comparing the interaction level and impression level between hotels that have data for the combined score, and hotels that have missing data. Statistically speaking: Is there a significant relationship between interaction or impression level, and the probability that the hotel data are missing, for the combined variable?
+
+`r pander(coefsc, digits=2)`
+
+The missing data analysis shows that *there is a significant statistical relationship between impression and interaction levels, and the probability that hotels have missing data* on the combined variable. Specifically, *hotels with lower impression levels, or lower interaction levels, are more likely to have missing data*. One possible explanation for this relationship would be that hotels that have a higher Internet presence in general, have more impressions and interactions, and are also likely to have given themselves a rating for "party people", "business people", etc. So if we based our analysis on these scores, we might actually just be analysing a hotel's online presence, and not whether the hotel is actually better for nightlife. 
+
+Therefore, we need to look at other data. Fortunately, we also have information about the hotels' locations, and points of interest in these cities.
+
+\newpage
+
+## 1.3. Geographic Information ##
+
+*1.3. Geographic exploration*. Since we have the geographic coordinates of the hotels and the POIs, we can visualise this information geographically. A geographic visualisation may give clues to the best approach for analysis.
+(a) Hotels on 4 maps: Amsterdam, Thessaloniki, Hong Kong, Los Angeles
+(b) POIs overlaid on hotel maps
+(c) Colour hotels with "nightlife" identifiers and colour POIs with "nightlife" characteristics
+
+
+![Hotel locations in Amsterdam](Amshotels1.png)
+
+![Hotel locations in Hong Kong](HKhotels1.png)
+
+![Hotel locations in Los Angeles](LAhotels1.png)
+
+
+![Hotel locations in Thessaloniki](Theshotels1.png)
+
+\newpage
+
+## 1.4. POI data ##
+
+*1.4. POI data.* We also have data on points of interest (POIs) in each city. These are geographically specified as well, so we can map them with the hotel locations. However, mapping all of the POIs with the hotel locations creates quite dense maps, because there are many more POIs than hotels.
+
+
+![Hotels and POIs in Amsterdam](Amshotels2.png)
+
+![Hotels and POIs in Hong Kong](HKhotels2.png)
+
+
+![Hotels and POIs in Los Angeles](LAhotels2.png)
+
+![Hotels and POIs in Thessaloniki](Theshotels2.png)
+
+
+Initial explorations of the POI data show that multiple types of POI are contained in the *poi_types* variable, so we should split these to get a clearer look at the data.
+
+
+
+```{r poi_split, include=FALSE}
+
+# separate poi types
+types <- plyr::ldply(strsplit(as.character(pois$poi_types),", "), rbind)
+pois <- cbind(pois, types)
+
+```
+
+\newpage
+
+We might want to know what types of POIs are available.
+
+```{r poi_types, include=FALSE}
+
+allpois <- list(unique(unlist(strsplit(as.character(pois$poi_types),", ")))) # list of possible POI types
+
+freqpois <- table(unlist(strsplit(as.character(pois$poi_types),", "))) # table of POI type frequencies
+
+```
+
+`r pander(t(freqpois))`
+
+From this list, we can **heuristically** select the types of POIs that might be relevant to "nightlife": **"Bar / Pub"**, **"Festival Area"**, **"Disco / Nightclub"**, **"Casino"** . 
+
+*note: As a later step, we could check sensitivity to including certain types of POIs and not others, e.g., "Bar/Pub" but not "Restaurant".*
+
+\newpage
+
+Then we can map nightlife "hotspots" in each city. These are geographic regions where travellers might easily find "nightlife" POIs.
+
+```{r poi_nightlife, include=FALSE}
+
+vars <- c("1","2","3","4","5","6","7","8","9","10","11","12","13")
+
+# first check if any of the poi attributes match our list of nightlife types
+pois$bar <- apply(pois[vars], 1, function(r) any(r=="Bar / Pub")) # creates a new variable with "1" if the POI is a bar or pub
+pois$festival <- apply(pois[vars], 1, function(r) any(r=="Festival Area"))
+pois$disco <- apply(pois[vars], 1, function(r) any(r=="Disco / Nightclub"))
+pois$casino <- apply(pois[vars], 1, function(r) any(r=="Casino"))
+
+# I also tried including the following POIs, but there are so many of them that they decrease the power of the score to distinguish specifically "nightlife" spots
+#pois$fooddrink <- apply(pois[vars], 1, function(r) any(r=="Food & Drink")) 
+#pois$restaurant <- apply(pois[vars], 1, function(r) any(r=="Restaurants"))
+#pois$event <- apply(pois[vars], 1, function(r) any(r=="Event/Entertainment"))
+
+# set nightlife variables as a group
+nightvars <- c("bar","festival","disco","casino")
+
+# calculate nightlife score for POI - true/NA
+pois$nightlife <- apply(pois[nightvars], 1, function(r) any(r==TRUE))
+# convert true to score of 1 and NA to score of 0
+pois$nightlife[pois$nightlife==TRUE] <- 1
+pois$nightlife[is.na(pois$nightlife)] <- 0
+
+# create subset of POIs relevant to nightlife
+poinight <- pois[pois$nightlife==1,]
+
+```
+
+
+![Nightlife density in Amsterdam](Amsnightlife.png)
+
+![Nightlife density in Hong Kong](HKnightlife.png)
+
+
+![Nightlife density in Los Angeles](LAnightlife.png)
+
+![Nightlife density in Thessaloniki](Thesnightlife.png)
+
+
+\newpage
+
+# Part 2. Creating a nightlife score #
+
+
+We could use a machine learning approach to rank the hotels, but ML would require a **ground truth** of a hotel's *"nightlife"* score, with which to train and test the model. Here, we do not have a ground truth. What we do have are several variables that might predict a hotel's *nightlife* score. We can use these variables to create a score.
+
+Based on the previous data exploration, we know that hotel features, such as rating of "party people" hotels, have a lot of missing data, and so may not be the best choice to base an entire score on. However, we may use these features later, to check whether our score is good.
+
+## Solution: Nightlife Hot-Spot Score ##
+
+Based on the previous geographic analysis, we can see several nightlife "hot-spots", identified by a high density of POIs related to nightlife: bars/pubs, discos, casinos, etc. We can use this geographic density to create a score for each hotel's geographic nightlife density, from its geographic location.
+
+**Step 1. Estimate nightlife density**
+
+Nightlife density can be calculated from the POI data. Using two-dimensional kernel density estimation, we can estimate the density of nightlife hotspots across latitude and longitude. We use non-parametric local regression to estimate the relationship between latitude+longitude, and nightlife density.
+
+We want to know *relative* nightlife density for each city: travellers looking for places to stay in Thessaloniki are unlikely to change their plans just because there are more bars on average in Amsterdam.  
+
+We will use a statistical method that accounts for differences in absolute nightlife density between cities, but that can be generalised to more cities than appear in the current dataset.
+
+
+```{r density}
+
+# calculate density of nightlife pois - higher n gives better resolution, but runs for longer
+
+# gives score not corrected for differences between cities
+dens <- kde2d(poinight$latitude,poinight$longitude) # estimate nightlife density based on POIs
+gr <- data.frame(with(dens, expand.grid(x,y)), as.vector(dens$z)) # put density into a data frame
+names(gr) <- c("xgr", "ygr", "zgr") # name the data frame
+mod <- loess(zgr ~ xgr*ygr, data = gr) # fit localized nonparametric regression to estimate nightlife density from x and y
+
+# gives score corrected for differences between cities - still shows differences between cities
+dens <- kde3d(poinight$latitude,poinight$longitude,as.numeric(poinight$city)) # factors are not allowed: check that this solution (forcing to numeric) is ok
+gr <- data.frame(with(dens, expand.grid(x,y)), as.vector(dens$z)) # put density into a data frame
+names(gr) <- c("xgr", "ygr", "zgr")
+mod <- loess(zgr ~ xgr*ygr, data = gr) # fit localized nonparametric regression to estimate nightlife density from x and y
+
+# gives separate estimates for different cities - but find a better way than manual city-by-city hard-coding to do this (difficult because of density plot)
+ams <- subset(poinight, city=="Amsterdam")
+hk <- subset(poinight, city=="Hong Kong")
+la <- subset(poinight, city=="Los Angeles")
+thes <- subset(poinight, city=="Thessaloniki")
+
+densams <- kde2d(ams$latitude,ams$longitude)
+denshk <- kde2d(hk$latitude,hk$longitude)
+densla <- kde2d(la$latitude,la$longitude)
+densthes <- kde2d(thes$latitude,thes$longitude)
+
+grams <- data.frame(with(densams, expand.grid(x,y)), as.vector(densams$z)) 
+grams$city <- "Amsterdam"
+names(grams) <- c("xgr", "ygr", "zgr","city")
+grhk <- data.frame(with(denshk, expand.grid(x,y)), as.vector(denshk$z)) 
+grhk$city <- "Hong Kong"
+names(grhk) <- c("xgr", "ygr", "zgr","city")
+grla <- data.frame(with(densla, expand.grid(x,y)), as.vector(densla$z)) 
+grla$city <- "Los Angeles"
+names(grla) <- c("xgr", "ygr", "zgr","city")
+grthes <- data.frame(with(densthes, expand.grid(x,y)), as.vector(densthes$z)) 
+grthes$city <- "Thessaloniki"
+names(grthes) <- c("xgr", "ygr", "zgr","city")
+
+gr2 <- rbind(grams,grhk,grla,grthes)
+
+# try prediction with glmm (loess doesn't work with factors)
+mod2 <- glmer(zgr ~ xgr*ygr+(1|city), family=gaussian(), data=gr2) # zgr is zero inflated so should be poisson
+
+# still doesn't show good discrimination within cities, so try running separately for each city (but would have to find a way to automate this):
+
+modams <- loess(zgr ~ xgr*ygr, data = grams)
+modhk <- loess(zgr ~ xgr*ygr, data = grhk)
+modla <- loess(zgr ~ xgr*ygr, data = grla)
+modthes <- loess(zgr ~ xgr*ygr, data = grthes)
+
+```
+
+**Step 2. Calculate nightlife density for each hotel**
+
+We use the predictive function created in step 1 to calculate a nightlife density score for each hotel, based on its latitude and longitude.
+
+```{r predict}
+
+# apply the model to the hotel data - select one of these models
+
+hotels$nightdens <- predict(mod, newdata = data.frame(xgr = hotels$latitude, ygr = hotels$longitude)) # for model that does not include city
+hotels$nightdens2 <- predict(mod2, newdata = data.frame(xgr = hotels$latitude, ygr = hotels$longitude, city = hotels$city_name)) # for model that does include city
+
+# long version separately for each city (automate later)
+
+ams <- hotels[hotels$city_name=="Amsterdam",]
+hk <- hotels[hotels$city_name=="Hong Kong",]
+la <- hotels[hotels$city_name=="Los Angeles",]
+thes <- hotels[hotels$city_name=="Thessaloniki",]
+
+ams$nightdens3 <- predict(modams,newdata = data.frame(xgr = ams$latitude, 
+                                                      ygr = ams$longitude)) 
+hk$nightdens3 <- predict(modhk,newdata = data.frame(xgr = hk$latitude, 
+                                                      ygr = hk$longitude)) 
+la$nightdens3 <- predict(modla,newdata = data.frame(xgr = la$latitude, 
+                                                      ygr = la$longitude)) 
+thes$nightdens3 <- predict(modthes,newdata = data.frame(xgr = thes$latitude, 
+                                                      ygr = thes$longitude)) 
+
+hotels <- rbind(ams,hk,la,thes)
+
+```
+
+**Step 3. Rescale nightlife density score to min = 0 and max = 10**
+
+The final nightlife score needs to range from 0 to 10, with 10 representing the highest nightlife density in the dataset.
+
+```{r rescale}
+
+# the score that best accounts for differences between cities (but not yet automated)
+ams$nightlife3 <- scales::rescale(ams$nightdens3, to=c(0,10))
+hk$nightlife3 <- scales::rescale(hk$nightdens3, to=c(0,10))
+la$nightlife3 <- scales::rescale(la$nightdens3, to=c(0,10))
+thes$nightlife3 <- scales::rescale(thes$nightdens3, to=c(0,10))
+hotels <- rbind(ams,hk,la,thes)
+
+hotels$nightlife <- scales::rescale(hotels$nightdens, to=c(0,10)) # the easier-to-compute score
+hotels$nightlife2 <- scales::rescale(hotels$nightdens2, to=c(0,10)) # the score that better accounts for differences between cities
+
+```
+
+\newpage
+
+## Results ##
+
+**Distribution of nightlife score**
+
+The final nightlife score has a minimum of `r min(hotels$nightlife3, na.rm=TRUE)`, a maximum of `r max(hotels$nightlife3, na.rm=TRUE)`, a mean of `r mean(hotels$nightlife3, na.rm=TRUE)`, and a standard deviation of `r sd(hotels$nightlife3, na.rm=TRUE)`.
+
+```{r distribution of nightlife scores}
+
+png(filename="nightlifescoreshist.png",height=295,width=500,bg="white")
+hist <- ggplot(hotels, aes(nightlife3)) +
+  geom_histogram() +
+  labs(x = "Nightlife score")
+hist
+dev.off()
+
+png(filename="nightlifescoresoverlap.png",height=295,width=500,bg="white")
+overlap <- ggplot(hotels, aes(nightlife3, colour = city_name)) +
+  geom_density(size=2) +
+  labs(x = "Nightlife score")
+overlap
+dev.off()
+
+```
+
+![Nightlife score distribution, across all hotels](nightlifescoreshist.png)
+
+From the distribution of nightlife scores across the whole dataset, we can see that nightlife is not equally distributed among all hotels. Some hotels have a very low score, and some hotels have a very high score. This property makes the nightlife score very easy to use for recommendation - it discriminates well between hotels that are good for nightlife, and hotels that are bad for nightlife.
+
+
+**Distribution of nightlife score in each city**
+
+Now we can see which cities, and which hotels, are better for nightlife.
+
+```{r scoreuse}
+
+# create a variable where 1 = party people or singles hotel, 0 = business or family hotel, NA = missing (identical to "combined" score, above)
+hotels$nighttest <- NA
+hotels$nighttest[hotels$party_people==1] <- 1
+hotels$nighttest[hotels$singles==1] <- 1
+hotels$nighttest[hotels$business_people==1] <- 0
+hotels$nighttest[hotels$family_hotel==1] <- 0
+
+tabletest <- table(hotels$nighttest)
+names(tabletest) <- c("Business or Family","Party or Single")
+tablenatest <- table(is.na(hotels$nighttest))
+names(tablenatest) <- c("Business or Family or Party or Single","Missing")
+
+top5 <- hotels %>%
+        group_by(city_name) %>%
+        top_n(n = 5, wt = nightlife3)
+
+top5table <- top5[,c("basename","city_name","nightlife3")]
+names(top5table) <- c("Hotel", "City", "Nightlife score (0-10)")
+top5table <- setorder(top5table,City)
+
+png("table.png", height=500,width=500,bg="white")
+p<-tableGrob(top5table)
+grid.arrange(p)
+dev.off()
+
+```
+
+![Nightlife score distribution, in each city](nightlifescoresoverlap.png)
+
+Some cities have, on average, higher nightlife scores than others. This is to be expected, as some cities have higher relative density of clubs, bars, etc. close to hotels, than other cities. However, we do see some overlap, and a good range of scores within each city. 
+
+\newpage
+
+**Top 5 nightlife hotels in each city**
+
+`r kable(top5table)`
+
+\newpage
+
+## How good is the nightlife score? ##
+
+**Validity - how well does the nightlife score discriminate between "party people" hotels (should have a high nightlife score) and "business" or "family" hotels (should have a low nightlife score)?**
+
+For the nightlife score to be useful, it should distinguish between hotels that have been rated elsewhere as good for party people, and good for business travellers or families. Specifically, "party people" hotels, or hotels for "singles", should have a high nightlife score, while "business" or "family" hotels should have a low nightlife score.
+
+Note that we did not use "party people", "singles", "business", or "family" hotel characteristics when creating the nightlife score. This is because these characteristics have a very high level of missing data, and therefore, a nightlife score created on this very small subset of the actual data would probably not generalise well to all the hotels on trivago. 
+
+However, we can use this subset of hotels to test whether our score is useful. And in future, if more data became available on these variables, we could add them to the predictive model, and incorporate them into the nightlife score.
+
+First, we create a new variable that combines our information about "party people", "business", and "family" hotels (it will be dichotomous, with 1 = "party people", 0 = "business" or "family", and NA = missing information):
+
+Looking at the descriptive statistics for this new variable, including missing data: Even when we combine all the information about "party people", "singles", "business", and "family" hotels, we still have `r (tablenatest[2]/tablenatest[1])*100`% missing data.
+
+`r pander(tablenatest)`
+
+But we have enough data on the different types of hotels to use it for testing our nightlife score.
+
+`r pander(tabletest)`
+
+We can use a simple regression to see if our nightlife score correctly predicts whether a hotel will be identified as "party people" or "business/family" (for the subset of hotels that have this information):
+
+**Results of the validity test.**
+
+```{r validity}
+
+hotels$nighttest <- as.factor(hotels$nighttest)
+
+# use logistic regression to see whether nightlife score can discriminate between party people/singles and business/family hotels, in subset of hotels with data on this.
+
+test <- subset(hotels, !is.na(hotels$nighttest))
+test1 <- glmer(nighttest ~ nightlife + (1|city_name), family=binomial, data = test)
+test2 <- glmer(nighttest ~ nightlife2 + (1|city_name), family=binomial, data = test)
+test3 <- glmer(nighttest ~ nightlife3 + (1|city_name), family=binomial, data = test)
+tt1 <- summary(test1)
+tt2 <- summary(test2)
+tt3 <- summary(test3)
+
+coefs <- rbind(c("Score","Coefficient","SE","p value"),
+               c("Score 1",tt1$coefficients[2],tt1$coefficients[4],tt1$coefficients[8]),
+               c("Score 2",tt2$coefficients[2],tt2$coefficients[4],tt2$coefficients[8]),
+               c("Score 3",tt3$coefficients[2],tt3$coefficients[4],tt3$coefficients[8]))
+names(coefs) <- c("Score","Coefficient","SE","p value")
+
+test2plot <- ggplot(test, aes(nighttest, nightlife3)) +
+                geom_point(aes(colour = nighttest, size = 4)) +
+                facet_grid(~ city_name) +
+                labs(x = "Hotel type (1 = party people or singles, 0 = business or family)",
+                     y = "Nightlife score") +
+                theme(legend.position="none")
+
+```
+
+*Comparing geo score 1 (latitude and longitude only) with geo score 2 (calculated separately for each city)*
+
+`r kable(coefs) `
+
+We can see that geo score 2 (calculated separately for each city) **significantly predicts** whether a hotel will be labelled as "party people / singles" or "business people / families". Score 1, however, does not significantly predict the hotel label. Score 3 falls just under the threshold of statistical significance (p = .066), but gives a better resolution of hotel rankings within cities than Score 2, and has a similar effect size (coefficient). On balance, the most useful score to travellers would be Score 3. So Score 3 is selected for this presentation.
+
+In general, we can see that hotels labelled as "party people" or "singles", tend to have higher nightlife scores than hotels for "business people" or "families". But some "business people" and "family" hotels also have high nightlife scores. There is some overlap between geographical density of nightlife, and hotels that might be suitable for business or family travellers. 
+
+\newpage
+
+**Reliability - how well do the hotels map onto nightlife hotspots?**
+
+Since our nightlife score is based on geographic denisty of nightlife POIs, we should see a close match between a hotel's nightlife score, and where the hotel is on a map, relative to nightlife hotspots.
+
+We should see that hotels with darker colours (higher nightlife scores) are clustered in the nightlife "hot spots" we identified in the beginning.
+
+From a visual inspection, the hotels with high nightlife scores seem to be clustered in the nightlife hot spots for each city, with some variation. Hotels further outside the city and further from nightlife hotspots have lower nightlife scores, as expected.
+
+![Hotels in Amsterdam, with nightlife scores](Amsnightlifehotels.png)
+
+![Hotels in Hong Kong, with nightlife scores](HKnightlifehotels.png)
+
+![Hotels in Los Angeles, with nightlife scores](LAnightlifehotels.png)
+
+![Hotels in Thessaloniki, with nightlife scores](Thesnightlifehotels.png)
+
+## Creating a csv with the nightlife score ##
+
+Finally, create a .csv file with the following columns: hotel_id, city_id, score.
+
+```{r csv}
+
+hotels$score <- hotels$nightlife3
+hotelscores <- hotels[,c("hotel_id","city_id","score")]
+
+write.csv(hotelscores, file = "hotelscores.csv", row.names = FALSE)
+
+```
